@@ -412,47 +412,33 @@ func (p *Parser) parseStreamUntilEndstream(dict *Dictionary) (*Stream, error) {
 		}
 	}
 
-	buf := make([]byte, 1)
-	lookback := make([]byte, 0, 32)
-
+	// The data ends at the first "endstream", searched for a buffer at a time
+	// so that a large stream, such as an image whose /Length is indirect, is
+	// not read byte by byte.
+	keyword := []byte(KeywordEndstream)
 	for {
-		_, err := reader.Read(buf)
+		chunk, err := reader.Peek(reader.Size())
+		if idx := bytes.Index(chunk, keyword); idx >= 0 {
+			// The end-of-line marker before endstream is not stream data
+			// (Section 7.3.8.1), but without /Length there is no way to
+			// tell it from a last byte of 0x0A or 0x0D that belongs to the
+			// data: removing it corrupts the flate streams of golang.pdf,
+			// gobook.0.pdf and us-031a.pdf. The byte is kept - a trailing
+			// newline is harmless to zlib and to the content parser, and
+			// keeping it never loses data.
+			content = append(content, chunk[:idx]...)
+			_, _ = reader.Discard(idx + len(keyword))
+			break
+		}
 		if err != nil {
 			return nil, fmt.Errorf("unexpected EOF while reading stream: %w", err)
 		}
 
-		lookback = append(lookback, buf[0])
-		content = append(content, buf[0])
-
-		// Keep lookback buffer reasonable size
-		if len(lookback) > 32 {
-			lookback = lookback[1:]
-		}
-
-		// Check for "endstream" in lookback
-		if len(lookback) >= len(KeywordEndstream) {
-			idx := -1
-			for i := len(lookback) - len(KeywordEndstream); i >= 0; i-- {
-				if string(lookback[i:i+len(KeywordEndstream)]) == KeywordEndstream {
-					idx = i
-					break
-				}
-			}
-
-			if idx >= 0 {
-				// Found endstream - trim it from content
-				contentLen := len(content) - (len(lookback) - idx)
-				content = content[:contentLen]
-				// The end-of-line marker before endstream is not stream data
-				// (Section 7.3.8.1), but without /Length there is no way to
-				// tell it from a last byte of 0x0A or 0x0D that belongs to the
-				// data: removing it corrupts the flate streams of golang.pdf,
-				// gobook.0.pdf and us-031a.pdf. The byte is kept - a trailing
-				// newline is harmless to zlib and to the content parser, and
-				// keeping it never loses data.
-				break
-			}
-		}
+		// The last bytes of the chunk may begin a keyword that the next read
+		// completes, so they stay in the buffer.
+		consumed := len(chunk) - (len(keyword) - 1)
+		content = append(content, chunk[:consumed]...)
+		_, _ = reader.Discard(consumed)
 	}
 
 	// Update lexer state - skip whitespace and read the next token

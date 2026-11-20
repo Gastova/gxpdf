@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/coregx/gxpdf/internal/testutil"
@@ -101,4 +102,40 @@ func TestStreamWithoutDirectLengthAndWithoutEndstreamFails(t *testing.T) {
 	_, err = reader.GetObject(reference.Number)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "unexpected EOF")
+}
+
+// TestStreamWithoutDirectLengthLongerThanTheReadBuffer covers data that spans
+// several reads. The sizes sweep the endstream keyword across the end of a
+// read, where it arrives in two parts, and the patterns hold starts of the
+// keyword that are data and must not end the stream.
+func TestStreamWithoutDirectLengthLongerThanTheReadBuffer(t *testing.T) {
+	const bufferSize = 4096 // bufio's default, which the lexer reads with
+
+	tests := []struct {
+		name    string
+		pattern string
+		from    int
+		to      int
+	}{
+		{name: "keyword across the first read", pattern: "x", from: bufferSize - 100, to: bufferSize + 20},
+		{name: "keyword across a later read", pattern: "x", from: 3*bufferSize - 100, to: 3*bufferSize + 20},
+		{name: "data that starts like the keyword", pattern: "endstrea", from: bufferSize - 100, to: bufferSize + 20},
+		{name: "data that ends like the keyword", pattern: "ndstream", from: 2*bufferSize - 100, to: 2*bufferSize + 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for size := tt.from; size <= tt.to; size++ {
+				payload := strings.Repeat(tt.pattern, size/len(tt.pattern)+1)[:size]
+				body := "<< /Length 5 0 R >>\nstream\r\n" + payload + "\nendstream"
+
+				reader, err := OpenPDFFromBytes(streamWithIndirectLengthPDF(body))
+				require.NoError(t, err, "size %d", size)
+				content := string(pageContentStream(t, reader).Content())
+				require.NoError(t, reader.Close())
+
+				require.Equal(t, payload+"\n", content, "size %d", size)
+			}
+		})
+	}
 }
